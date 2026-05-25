@@ -1,4 +1,4 @@
-// Copyright (c) Microsoft Corporation.
+#![feature(try_with_capacity)] // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 
 //! Fallible allocation functions for the Rust standard library's [`alloc::vec::Vec`]
@@ -57,14 +57,19 @@ mod collect;
 mod error;
 mod set_len_on_drop;
 
+use alloc::alloc::Global;
+use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::{collections::TryReserveError, vec::Vec};
 use set_len_on_drop::SetLenOnDrop;
 
+pub use collect::TryCollect;
+use core::alloc::AllocError;
 #[cfg(feature = "allocator_api")]
 use core::alloc::Allocator;
-
-pub use collect::TryCollect;
+use core::fmt::Debug;
 pub use error::alloc_error;
+use generic_array::{ArrayLength, GenericArray};
 
 // These are defined so that the try_vec! and try_vec_in! macros can refer to
 // these types in a consistent way: even if the consuming crate doesn't use
@@ -277,6 +282,8 @@ pub trait FallibleVec<T>: Sized {
     fn try_resize(&mut self, new_len: usize, item: T) -> Result<(), TryReserveError>
     where
         T: Clone;
+
+    fn try_into_boxed_slice(self) -> Result<Box<[T]>, TryReserveError>;
 }
 
 macro_rules! impl_trait_for_vec {
@@ -464,6 +471,10 @@ impl_trait_for_vec! {
             }
 
             Ok(())
+        }
+
+        fn  try_into_boxed_slice(self) -> Result<Box<[T]>, TryReserveError> {
+            todo!()
         }
     }
 }
@@ -752,5 +763,117 @@ impl_trait_for_vec! {
     }
 }
 
+pub trait SliceExt {
+    type Item;
+    fn try_to_vec(&self) -> Result<Vec<Self::Item>, TryReserveError>
+    where
+        Self::Item: Clone;
+    fn try_to_vec_in<A: Allocator>(&self, alloc: A) -> Result<Vec<Self::Item, A>, TryReserveError>
+    where
+        Self::Item: Clone;
+}
+
+impl<T> SliceExt for [T] {
+    type Item = T;
+    fn try_to_vec(&self) -> Result<Vec<T>, TryReserveError>
+    where
+        T: Clone,
+    {
+        self.try_to_vec_in(Global)
+    }
+    fn try_to_vec_in<A: Allocator>(&self, alloc: A) -> Result<Vec<T, A>, TryReserveError>
+    where
+        T: Clone,
+    {
+        let mut result = Vec::try_with_capacity_in(self.len(), alloc)?;
+        for x in self {
+            result.try_push(x.clone())?;
+        }
+        Ok(result)
+    }
+}
+
+pub trait StrExt {
+    fn try_to_string(&self) -> Result<String, TryReserveError>;
+}
+
+impl StrExt for str {
+    fn try_to_string(&self) -> Result<String, TryReserveError> {
+        unsafe { Ok(String::from_utf8_unchecked(self.as_bytes().try_to_vec()?)) }
+    }
+}
+
 #[cfg(test)]
 pub mod tests;
+
+#[derive(Debug)]
+pub struct TryCloneError;
+
+impl From<AllocError> for TryCloneError {
+    fn from(_: AllocError) -> Self {
+        TryCloneError
+    }
+}
+
+impl From<TryReserveError> for TryCloneError {
+    fn from(_: TryReserveError) -> Self {
+        TryCloneError
+    }
+}
+
+pub trait TryClone: Sized {
+    fn try_clone(&self) -> Result<Self, TryCloneError>;
+}
+
+impl<T: TryClone> TryClone for Box<T> {
+    fn try_clone(&self) -> Result<Self, TryCloneError> {
+        Ok(Box::try_new((**self).try_clone()?)?)
+    }
+}
+
+impl<T: TryClone> TryClone for Box<[T]> {
+    fn try_clone(&self) -> Result<Self, TryCloneError> {
+        let mut vec = Vec::try_with_capacity(self.len())?;
+        for x in self {
+            vec.try_push(x.try_clone()?)?;
+        }
+        Ok(vec.try_into_boxed_slice()?)
+    }
+}
+
+impl TryClone for u8 {
+    fn try_clone(&self) -> Result<Self, TryCloneError> {
+        Ok(*self)
+    }
+}
+
+impl<T, N: ArrayLength<T>> TryClone for GenericArray<T, N> {
+    fn try_clone(&self) -> Result<Self, TryCloneError> {
+        todo!()
+    }
+}
+
+impl TryClone for String {
+    fn try_clone(&self) -> Result<Self, TryCloneError> {
+        Ok(self.try_to_string()?)
+    }
+}
+
+impl<T: TryClone> TryClone for Option<T> {
+    fn try_clone(&self) -> Result<Self, TryCloneError> {
+        Ok(match self {
+            None => None,
+            Some(x) => Some(x.try_clone()?),
+        })
+    }
+}
+
+impl<T: TryClone> TryClone for Vec<T> {
+    fn try_clone(&self) -> Result<Self, TryCloneError> {
+        let mut result = Vec::try_with_capacity(self.len())?;
+        for x in self {
+            result.try_push(x.try_clone()?)?;
+        }
+        Ok(result)
+    }
+}

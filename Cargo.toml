@@ -11,6 +11,7 @@ keywords = ["vec", "fallible", "collections", "no_std"]
 
 [dependencies]
 static_assertions = "1.1"
+generic-array = "0.14.7"
 
 [features]
 default = ["allocator_api", "use_unstable_apis"]
